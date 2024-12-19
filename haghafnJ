@@ -1,0 +1,323 @@
+#include "stm32f4xx.h"
+#include <stdio.h>
+#define LCD_BACKLIGHT 0x08  // Bit điều khiển đèn nền (tùy thuộc vào module)
+#define LCD_ADDR (0x27 << 1)  // Địa chỉ I2C của LCD
+#define LCD_EN (1 << 2)  // EN bit
+#define LCD_RS (1 << 0)  // RS bit
+#define TRIG_PIN (1 << 5)  // PA5
+#define ECHO_PIN (1 << 6)  // PA6
+#define LED_GREEN_PIN (1 << 4)  // PA4 (Green LED)
+#define LED_RED_PIN (1 << 0)  // PB0 (Red LED)
+#define SW1_PIN (1 << 0)  // PA0 (SW1)
+#define SW2_PIN (1 << 1)  // PA1 (SW2)
+#define RELAY_PIN (1 << 7)  // PA7 (Relay control pin)
+int stt = 1;  // Trạng thái bắt đầu là 1
+
+
+void Relay_Init(void)
+{
+    RCC->AHB1ENR |= (1 << 0);  // Kích hoạt clock GPIOA
+    GPIOA->MODER &= ~(3 << (2 * 7));  // PA7: Clear mode
+    GPIOA->MODER |= (1 << (2 * 7));  // PA7: Output mode
+}
+
+void Control_Relay(int state)
+{
+    if (state == 1)
+    {
+        GPIOA->BSRR = RELAY_PIN;  // Bật relay (PA7 = 1)
+    }
+    else
+    {
+        GPIOA->BSRR = RELAY_PIN << 16;  // Tắt relay (PA7 = 0)
+    }
+}
+
+void SW2_Init(void)
+{
+   RCC->AHB1ENR |= (1 << 0);  // Kích hoạt clock GPIOA
+   GPIOA->MODER &= ~(3 << (2 * 1));  // PA1: Input mode
+   GPIOA->PUPDR |= (1 << (2 * 1));  // PA1: Pull-up
+}
+int SW2_Read(void)
+{
+   return (GPIOA->IDR & SW2_PIN) == 0;  // Nếu PA1 là 0, nút được nhấn
+}
+#include "core_cm4.h"  // Để sử dụng NVIC_SystemReset()
+void Reset_System(void)
+{
+   NVIC_SystemReset();  // Thực hiện reset phần mềm
+}
+void Timer2_Init(void)
+{
+RCC->APB1ENR |= (1 << 0);  // Kích hoạt clock cho TIM2 (RCC_APB1ENR_TIM2EN = 1 << 0)
+TIM2->PSC = (SystemCoreClock / 1000000) - 1;  // Prescaler cho tần số 1 MHz
+TIM2->ARR = 0xFFFF;  // Giá trị tối đa cho Auto-Reload
+TIM2->CR1 |= (1 << 0);  // Bật Timer (TIM_CR1_CEN = 1 << 0)
+}
+// Hàm delay bằng micro giây
+void delay_us(uint32_t us)
+{
+uint32_t start_time = TIM2->CNT;
+while ((TIM2->CNT - start_time) < us)
+    ;
+}
+// Hàm khởi tạo I2C1
+void I2C_Init(void)
+{
+RCC->AHB1ENR |= (1 << 1);  // Kích hoạt clock cho GPIOB
+RCC->APB1ENR |= (1 << 21);  // Kích hoạt clock cho I2C1
+GPIOB->MODER &= ~((3 << (2 * 8)) | (3 << (2 * 9)));  // Xóa cấu hình mode
+GPIOB->MODER |= (2 << (2 * 8)) | (2 << (2 * 9));  // Alternate Function (AF4)
+GPIOB->OTYPER |= (1 << 8) | (1 << 9);  // Open-drain (OTYPER)
+GPIOB->OSPEEDR |= (3 << (2 * 8)) | (3 << (2 * 9));  // High speed (OSPEEDR)
+GPIOB->PUPDR |= (1 << (2 * 8)) | (1 << (2 * 9));  // Pull-up (PUPDR)
+GPIOB->AFR[1] |= (4 << (4 * 0)) | (4 << (4 * 1));  // Alternate function AF4
+I2C1->CR1 |= (1 << 15);  // Reset I2C
+I2C1->CR1 &= ~(1 << 15);  // Clear reset
+I2C1->CR2 = 42;  // Tần số clock APB1 (MHz)
+I2C1->CCR = 210;  // Giá trị Clock Control Register
+I2C1->TRISE = 43;  // Max rise time
+I2C1->CR1 |= (1 << 0);  // Bật I2C1
+}
+// Hàm gửi dữ liệu qua I2C
+void I2C_SendData(uint8_t address, uint8_t data)
+{
+I2C1->CR1 |= (1 << 8);  // START condition
+while (!(I2C1->SR1 & (1 << 0)))
+    ;
+I2C1->DR = address;  // Gửi địa chỉ
+while (!(I2C1->SR1 & (1 << 1)))
+    ;
+(void)I2C1->SR1;
+(void)I2C1->SR2;
+while (!(I2C1->SR1 & (1 << 7)))
+    ;
+I2C1->DR = data;  // Gửi dữ liệu
+while (!(I2C1->SR1 & (1 << 2)))
+    ;
+I2C1->CR1 |= (1 << 9);  // STOP condition
+}
+// Hàm gửi lệnh đến LCD
+void LCD_SendCmd(uint8_t cmd)
+{
+uint8_t data_u = (cmd & 0xF0);
+uint8_t data_l = ((cmd << 4) & 0xF0);
+uint8_t data_t[4] = {
+    data_u | LCD_EN | LCD_BACKLIGHT,
+    data_u | LCD_BACKLIGHT,
+    data_l | LCD_EN | LCD_BACKLIGHT,
+    data_l | LCD_BACKLIGHT};
+for (int i = 0; i < 4; i++)
+{
+    I2C_SendData(LCD_ADDR, data_t[i]);
+    delay_us(50);
+}
+}
+// Hàm gửi dữ liệu đến LCD
+void LCD_SendData(uint8_t data)
+{
+uint8_t data_u = (data & 0xF0);
+uint8_t data_l = ((data << 4) & 0xF0);
+uint8_t data_t[4] = {
+    data_u | LCD_EN | LCD_RS | LCD_BACKLIGHT,
+data_u | LCD_RS | LCD_BACKLIGHT,
+    data_l | LCD_EN | LCD_RS | LCD_BACKLIGHT,
+    data_l | LCD_RS | LCD_BACKLIGHT};
+for (int i = 0; i < 4; i++)
+{
+    I2C_SendData(LCD_ADDR, data_t[i]);
+    delay_us(50);
+}
+}
+// Hàm khởi tạo LCD
+void LCD_Init(void)
+{
+LCD_SendCmd(0x33);  // LCD 4-bit mode
+delay_us(5000);
+LCD_SendCmd(0x32);  // LCD 4-bit mode
+delay_us(2000);
+LCD_SendCmd(0x06);  // Auto increment cursor
+delay_us(2000);
+LCD_SendCmd(0x0C);  // Display on, cursor off
+delay_us(2000);
+LCD_SendCmd(0x28);  // 2-line mode
+delay_us(2000);
+LCD_SendCmd(0x01);  // Clear screen
+delay_us(2000);
+}
+// Hàm hiển thị chuỗi trên LCD
+void LCD_PutString(char *string, int line)
+{
+if (line == 1)
+{
+    LCD_SendCmd(0x80);  // Move to first line
+}
+else
+{
+    LCD_SendCmd(0xC0);  // Move to second line
+}
+while (*string)
+{
+    LCD_SendData((uint8_t)(*string));
+    string++;
+}
+}
+// Khởi tạo PA0 (SW1) là đầu vào với pull-up
+void SW1_Init(void)
+{
+RCC->AHB1ENR |= (1 << 0);  // Kích hoạt clock GPIOA
+GPIOA->MODER &= ~(3 << (2 * 0));  // PA0: Input mode
+GPIOA->PUPDR |= (1 << (2 * 0));  // PA0: Pull-up
+}
+// Kiểm tra trạng thái SW1 (PA0)
+int SW1_Read(void)
+{
+return (GPIOA->IDR & SW1_PIN) == 0;  // Nếu PA0 là 0, nút được nhấn
+}
+// Khởi tạo HC-SR04
+void HC_SR04_Init(void)
+{
+RCC->AHB1ENR |= (1 << 0);  // Kích hoạt clock GPIOA
+GPIOA->MODER &= ~((3 << (2 * 5)) | (3 << (2 * 6)));  // Clear mode
+GPIOA->MODER |= (1 << (2 * 5));  // PA5: Output mode (01)
+GPIOA->PUPDR |= (1 << (2 * 6));  // PA6: Pull-up (01)
+}
+// Lấy khoảng cách từ HC-SR04
+float HC_SR04_GetDistance(void)
+{
+uint32_t start_time = 0, end_time = 0, pulse_width = 0;
+GPIOA->BSRR = TRIG_PIN;  // Set PA5
+delay_us(10);
+GPIOA->BSRR = (TRIG_PIN << 16);  // Reset PA5
+while (!(GPIOA->IDR & ECHO_PIN))
+    start_time = TIM2->CNT;
+while (GPIOA->IDR & ECHO_PIN)
+    end_time = TIM2->CNT;
+if (end_time >= start_time)
+    pulse_width = end_time - start_time;
+else
+    pulse_width = (0xFFFF - start_time) + end_time;
+return (pulse_width * 0.0343f) / 2.0f;  // Khoảng cách (cm)
+}
+// Hàm khởi tạo đèn LED
+void LED_Init(void)
+{
+RCC->AHB1ENR |= (1 << 0);  // Kích hoạt clock GPIOA
+RCC->AHB1ENR |= (1 << 1);  // Kích hoạt clock GPIOB
+GPIOA->MODER &= ~(3 << (2 * 4));  // PA4: Output mode
+GPIOA->MODER |= (1 << (2 * 4));  // PA4: Output mode
+GPIOB->MODER &= ~(3 << (2 * 0));  // PB0: Output mode
+GPIOB->MODER |= (1 << (2 * 0));  // PB0: Output mode
+}
+// Điều khiển đèn LED
+void Control_LEDs(float distance) {
+    static int led_green_state = 0; // Trạng thái hiện tại của LED xanh
+    static int led_red_state = 0;   // Trạng thái hiện tại của LED đỏ
+    static int counter_green = 0;   // Bộ đếm cho LED xanh
+    static int counter_red = 0;     // Bộ đếm cho LED đỏ
+    int red_blink_period = 5;       // Chu kỳ nhấp nháy của LED đỏ (mặc định)
+
+    if (stt == 0) {
+        // Tắt cả hai đèn LED khi hệ thống ngừng hoạt động
+        GPIOA->BSRR = LED_GREEN_PIN << 16;  // Tắt LED xanh
+        GPIOB->BSRR = LED_RED_PIN << 16;    // Tắt LED đỏ
+    } else {
+        if (distance < 20.0f) {
+            // Điều chỉnh chu kỳ nhấp nháy của LED đỏ dựa trên khoảng cách
+            if (distance < 5.0f) {
+                red_blink_period = 1;  // Khoảng cách < 5 cm, nhấp nháy nhanh nhất
+            } else if (distance < 10.0f) {
+                red_blink_period = 2;  // Khoảng cách < 10 cm
+            } else if (distance < 15.0f) {
+                red_blink_period = 3;  // Khoảng cách < 15 cm
+            } else {
+                red_blink_period = 5;  // Khoảng cách >= 15 cm, nhấp nháy chậm nhất
+            }
+
+            if (counter_red == 0) {
+                led_red_state = !led_red_state; // Đổi trạng thái LED đỏ
+                if (led_red_state) {
+                    GPIOB->BSRR = LED_RED_PIN; // Bật LED đỏ
+                } else {
+                    GPIOB->BSRR = LED_RED_PIN << 16; // Tắt LED đỏ
+                }
+            }
+            counter_red = (counter_red + 1) % red_blink_period;
+            GPIOA->BSRR = LED_GREEN_PIN << 16;  // Tắt LED xanh
+        } else {
+            // LED xanh nhấp nháy khi khoảng cách >= 20.0 cm
+            GPIOB->BSRR = LED_RED_PIN << 16;    // Tắt LED đỏ
+            if (counter_green == 0) {
+                led_green_state = !led_green_state; // Đổi trạng thái LED xanh
+                if (led_green_state) {
+                    GPIOA->BSRR = LED_GREEN_PIN;    // Bật LED xanh
+                } else {
+                    GPIOA->BSRR = LED_GREEN_PIN << 16; // Tắt LED xanh
+                }
+            }
+            counter_green = (counter_green + 1) % 5; // Điều chỉnh tốc độ nhấp nháy của LED xanh
+        }
+    }
+}
+
+
+// Hiển thị trạng thái và khoảng cách lên LCD
+void Display_LCD(float distance)
+{
+char buffer[32];
+sprintf(buffer, "obs: %d stt: %d", (distance < 20.0f) ? 1 : 0, stt);
+LCD_PutString(buffer, 1);
+sprintf(buffer, "Dist: %.2f cm", distance);
+LCD_PutString(buffer, 2);
+}
+int main()
+{
+    Timer2_Init();
+    I2C_Init();
+    LCD_Init();
+    HC_SR04_Init();
+    LED_Init();
+    SW1_Init();
+    SW2_Init();  // Khởi tạo SW2
+    Relay_Init();  // Khởi tạo relay
+
+    while (1)
+    {
+        if (SW1_Read())  // Nếu nút SW1 được nhấn
+        {
+            stt = (stt == 1) ? 0 : 1;  // Đổi giá trị stt
+            // Cập nhật LCD ngay lập tức với giá trị mới của stt
+            char buffer[32];
+            sprintf(buffer, "obs: %d stt: %d", (HC_SR04_GetDistance() < 20.0f) ? 1 : 0, stt);
+            LCD_PutString(buffer, 1);  // Hiển thị lên dòng 1 của LCD
+            sprintf(buffer, "Dist: %.2f cm", HC_SR04_GetDistance());
+            LCD_PutString(buffer, 2);  // Hiển thị khoảng cách lên dòng 2 của LCD
+            delay_us(500000);  // Delay để LCD kịp hiển thị giá trị mới (500 ms)
+        }
+        if (SW2_Read())  // Nếu nút SW2 được nhấn
+        {
+            Reset_System();  // Thực hiện reset hệ thống
+        }
+
+        // Điều khiển LED và LCD chỉ khi stt = 1
+        if (stt == 1)
+        {
+            float distance = HC_SR04_GetDistance();
+            Control_LEDs(distance);  // Điều khiển LED dựa trên khoảng cách
+            Display_LCD(distance);  // Hiển thị trạng thái và khoảng cách lên LCD
+            Control_Relay(1);  // Bật relay khi stt == 1
+        }
+        else
+        {
+            // Tắt đèn LED khi stt = 0
+            Control_LEDs(0.0f);
+            Control_Relay(0);  // Tắt relay khi stt == 0
+        }
+
+        delay_us(1000000);  // Delay 1 giây
+    }
+}
+
+
+
