@@ -1,0 +1,11 @@
+Bài tập cuối kì lập trình nhúng thầy Kiêm Hùng - UET VNU
+Sử dụng lập trình thanh ghi lập trình trên STM32 Nucleo 401RE
+Yêu cầu lập trình nhúng vào xe tự hành hệ thống cảnh báo khi gặp vật cản. Hiển thị vật cản, hệ thống và khoảng cách trên LCD, có nút dừng khẩn cấp khi xe gặp vật cản quá gần.
+Linh kiện: 
+- Led xanh, led đỏ
+- Button
+- LCD/i2c
+- Cảm biến siêu âm
+- Dây nối
+- Pin và đế pin
+- Tích hợp trên xe tự hành (Điều khiển bằng Relay On/Off)
